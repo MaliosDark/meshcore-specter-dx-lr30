@@ -1,0 +1,10 @@
+# PlatformIO build output
+.pio/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Logs
+logs/
+*.log
