@@ -274,6 +274,84 @@ The RESET button triggers a clean boot without entering bootloader mode.
 
 ---
 
+## Independent Watchdog (IWDG)
+
+The firmware enables the STM32F103 **Independent Watchdog (IWDG)** with an
+8-second timeout. The IWDG runs from the internal 40 kHz LSI oscillator,
+completely independent of the main CPU clock and system reset logic.
+
+### Behaviour
+
+| State | IWDG outcome |
+|-------|--------------|
+| Normal operation | `IWatchdog.reload()` is called at the top of every `loop()` iteration — watchdog never fires |
+| Radio HALT (SX1262 init failure) | Firmware enters 5 Hz LED blink loop — no reload — IWDG fires after 8 s — chip resets — retries `radio_init()` |
+| Main loop freeze (any other cause) | Same as above — watchdog fires, chip resets |
+
+### Why 8 seconds?
+
+Maximum single-pass blocking time in `loop()` is ≈ 800 ms (CSMA backoff) +
+≈ 500 ms (TX airtime) ≈ 1.3 s total. 8 s gives a comfortable 6× margin
+while still recovering promptly from a stuck state.
+
+### Initialisation
+
+```cpp
+// In setup(), before radio_init():
+IWatchdog.begin(8000000);  // 8 000 000 µs = 8 s
+
+// In loop(), first line:
+IWatchdog.reload();
+```
+
+The watchdog is started **before** `radio_init()` so a failure there is also
+covered. `IWatchdog.h` is a STM32duino built-in — no extra `lib_deps` entry
+needed beyond `platform = ststm32` with `framework = arduino`.
+
+### Before vs after IWDG
+
+| | Before IWDG | After IWDG |
+|---|---|---|
+| SX1262 SPI glitch on power cycle | Board blinks at 5 Hz indefinitely, requires physical RESET | Board blinks ≤ 8 s, resets, retries automatically |
+| Any `while(true)` hang in firmware | Permanent lock-up | Auto-reset in ≤ 8 s |
+
+---
+
+## LED Behaviour Patterns
+
+The onboard LED is on **PB11, active HIGH** (HIGH = ON, LOW = OFF).
+
+| Pattern | Trigger |
+|---------|---------|
+| Solid ON (boot) | `setup()` running — identity init + radio init in progress |
+| OFF (idle) | Radio initialised, listening for packets |
+| 1 × 80 ms blink | Heartbeat every 10 s (sign of life) |
+| 1 × 40 ms blink | LoRa packet received (any route type) |
+| 2 × 30 ms fast blinks | Packet successfully processed and relayed (connectivity confirmed) |
+| Solid ON (variable ~300–800 ms) | ADVERT transmitting — CSMA backoff + TX airtime |
+| 5 Hz continuous blink | Radio init HALT — IWDG will reset the board in ≤ 8 s |
+
+### Implementation
+
+```cpp
+// Helper in main.cpp:
+static void led_blink(uint8_t n, uint16_t ms) {
+    for (uint8_t i = 0; i < n; i++) {
+        digitalWrite(PIN_LED, LOW);   // ON
+        delay(ms);
+        digitalWrite(PIN_LED, HIGH);  // OFF
+        if (i < n - 1) delay(ms);
+    }
+}
+
+// Usage:
+led_blink(1, 40);   // on RX (packet received)
+led_blink(2, 30);   // on relay TX (connectivity)
+// Solid ON/OFF around send_pkt() for ADVERT transmissions
+```
+
+---
+
 ## Common Pitfalls
 
 ### 1. Wrong USB Port
@@ -306,7 +384,7 @@ Sending AT commands or debug commands to `/dev/ttyUSB1` does nothing.
 
 ### 4. Caching in MeshCore App
 
-When testing name changes (e.g., SPECTER-1811 → CF-BOLIVAR → SPECTER-1811),
+When testing name changes (e.g., SPECTER-1811 → SPECTER-7419 → SPECTER-1811),
 the app may cache the node by public key and not immediately reflect the new name.
 
 **Fix:** The public key is tied to the UID, so it never changes for a given
@@ -401,10 +479,9 @@ Relay hop=2
 ### Known Limitations
 
 1. **No DIO1 interrupt**: Polling mode only, ~1ms latency per check
-2. **No duty cycle enforcement**: Does not track EU868 1% duty cycle limit
+2. **No duty cycle enforcement**: Does not track the 10% duty cycle limit for the 869.4–869.65 MHz band
 3. **No LBT (Listen Before Talk)**: Simple random backoff, not carrier sense
-4. **No DIRECT routing**: Only FLOOD packets are processed
-5. **No encryption**: Packets are plaintext (MeshCore design choice)
+4. **No encryption**: Packets are plaintext (MeshCore design choice)
 
 ---
 

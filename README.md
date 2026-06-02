@@ -52,7 +52,7 @@ flowchart LR
 | MCU | STM32F103C8T6 | 72 MHz Cortex-M3, 64KB Flash, 20KB RAM |
 | Radio | SX1262 | Sub-GHz LoRa, up to +22 dBm |
 | USB-Serial | CH340 | Bootloader access via physical BOOT0+RESET buttons |
-| LED | PC13 | Active LOW, blinks on TX/RX |
+| LED | PB11 | Active HIGH — 1 blink = RX · 2 fast blinks = relay · solid = ADVERT TX |
 
 ### Pin Map
 
@@ -106,7 +106,10 @@ flowchart TD
         RX["radio.receive\nRF → RXEN"]:::radio
         PKT{Packet\narrived?}:::loop
         PARSE["Parse header\nroute · hops · path"]:::proto
-        FLOOD{route ==\nFLOOD?}:::proto
+        RTYPE{route type?}:::proto
+        DIRECT["DIRECT/TRANSPORT_DIRECT\nCheck hash in path"]:::proto
+        INHASH{My hash\nin path?}:::proto
+        RELAYD["TX unchanged"]:::radio
         HOP{hops ≥ 64?}:::drop
         DEDUP{Seen\nbefore?}:::drop
         OWN{My hash\nin path?}:::drop
@@ -120,9 +123,12 @@ flowchart TD
     ADV -- Yes --> BUILD --> TX1 --> ADV
     ADV -- No --> RX --> PKT
     PKT -- No --> ADV
-    PKT -- Yes --> PARSE --> FLOOD
-    FLOOD -- No --> ADV
-    FLOOD -- Yes --> HOP
+    PKT -- Yes --> PARSE --> RTYPE
+    RTYPE -- "FLOOD / TRANSPORT_FLOOD" --> HOP
+    RTYPE -- "DIRECT / TRANSPORT_DIRECT" --> DIRECT
+    DIRECT --> INHASH
+    INHASH -- No --> ADV
+    INHASH -- Yes --> RELAYD --> ADV
     HOP -- Yes --> ADV
     HOP -- No --> DEDUP
     DEDUP -- Yes --> ADV
@@ -162,13 +168,29 @@ sequenceDiagram
 ```
 Byte 0:  [ver(2)] [payload_type(4)] [route_type(2)]
            ↑                              ↑
-           0x00                    FLOOD = 0x01
+           0x00              TRANSPORT_FLOOD = 0x00
+                                     FLOOD = 0x01
+                                    DIRECT = 0x02
+                          TRANSPORT_DIRECT = 0x03
 
 Byte 1:  [hash_size_code(2)] [hop_count(6)]
 
 Bytes 2..N: path hashes (hop_count × hash_size bytes)
 Bytes N..:  payload (ADVERT / MESSAGE / etc.)
 ```
+
+### Routing Behaviour
+
+| Route type | Value | SPECTER action |
+|---|---|---|
+| `TRANSPORT_FLOOD` | `0x00` | Relay — append own hash, flood |
+| `FLOOD` | `0x01` | Relay — append own hash, flood |
+| `DIRECT` | `0x02` | Relay unchanged **if** own hash is in pre-built path |
+| `TRANSPORT_DIRECT` | `0x03` | Relay unchanged **if** own hash is in pre-built path |
+
+For **FLOOD** types: dedup cache + loop detection (own hash already in path) prevent
+storms. For **DIRECT** types: the full route is pre-computed by the source node;
+SPECTER only forwards if it is on that route.
 
 ### Radio Configuration
 
@@ -177,7 +199,7 @@ Bytes N..:  payload (ADVERT / MESSAGE / etc.)
 | Frequency | 869.618 MHz | EU868 MeshCore channel |
 | Spreading Factor | SF8 | Balance range/speed |
 | Bandwidth | 62.5 kHz | Narrow, more range |
-| Coding Rate | 4/5 | Minimum overhead |
+| Coding Rate | 4/8 | EU/UK Narrow preset standard |
 | Sync Word | 0x12 | LoRa private network |
 | TX Power | 14 dBm | Compliant + range |
 | CRC | 16-bit | Enabled |
@@ -201,6 +223,7 @@ Managed automatically by PlatformIO via `lib_deps` in `platformio.ini`:
 |---------|---------|---------|
 | [RadioLib](https://github.com/jgromes/RadioLib) | ^7.6.0 | SX1262 driver (polling mode, RADIOLIB_NC) |
 | [rweather/Crypto](https://github.com/rweather/arduinolibs/tree/master/libraries/Crypto) | ^0.4.0 | SHA256 + Ed25519 for deterministic key derivation and ADVERT signing |
+| IWatchdog (STM32duino built-in) | 1.0.0 | Independent Watchdog — auto-reset on radio HALT or loop freeze |
 
 No manual installation needed, `pio run` fetches them automatically.
 
@@ -215,8 +238,8 @@ pio run -e specter
 ### Memory Usage
 
 ```
-RAM:   ██░░░░░░░░  15.3%  (3128 / 20480 bytes)
-Flash: ████░░░░░░  39.5%  (51760 / 131072 bytes)*
+RAM:   ██░░░░░░░░  15.2%  (3116 / 20480 bytes)
+Flash: ████░░░░░░  38.5%  (50408 / 131072 bytes)*
 ```
 
 \* Many STM32F103C8T6 clones have 128KB flash (labeled as 64KB). SPECTER
@@ -277,17 +300,16 @@ stm32flash \
 Connect at **115200 8N1** on `/dev/ttyUSB0`. Press RESET to see startup:
 
 ```
-=== SPECTER MeshCore Repeater [SPECTER-A3F2] ===
+=== SPECTER MeshCore Repeater v1.1.0 [SPECTER-A3F2] ===
 Hash: 0xF4
 Radio init... OK
-Sending initial ADVERT...
-Listening...
-Listening...
-B RSSI=-87 SNR=7 len=110
+ADVERT initial
+ALIVE uptime=10s
+ALIVE uptime=20s
+RX RSSI=-87 SNR=7 len=110
 Relay hop=2
-Listening...
 Drop: dedup
-Listening...
+ALIVE uptime=30s
 ```
 
 > The node name (`SPECTER-A3F2`) and hash are unique per device.
@@ -344,21 +366,36 @@ Without a valid signature, the repeater is silently ignored by the network.
 
 ---
 
-## Customizing the node name
+## Customizing the node
 
-Edit `platformio.ini` and add one line to `build_flags`:
+Edit `platformio.ini` and add flags to `build_flags`:
 
 ```ini
 build_flags =
     -D HAL_UART_MODULE_ENABLED
     -D ENABLE_HWSERIAL1
     -D RADIOLIB_STATIC_ONLY=1
-    -D NODE_NAME_STR=\"MYNODE\"   ← add this
     -O2
+    -D NODE_NAME_STR=\"SPECTER-7419\"      # custom callsign
+    -D NODE_LAT_I=51478700                  # latitude  × 1 000 000 (optional)
+    -D NODE_LON_I=-3186700                  # longitude × 1 000 000 (optional)
 ```
 
-Then rebuild and reflash. The auto-generated `SPECTER-XXXX` default is used
-when this line is absent.
+### GPS coordinates
+
+When `NODE_LAT_I` and `NODE_LON_I` are defined, the ADVERT includes
+`FLAG_HAS_LOCATION` (`0x10`) and the coordinates as two `int32_t` values
+(degrees × 10⁶). The node will appear on MeshCore map clients.
+
+```
+latitude  =  51.4787° N  →  NODE_LAT_I=51478700
+longitude =  -3.1867° W  →  NODE_LON_I=-3186700
+```
+
+Omit both flags to send an ADVERT without GPS data.
+
+Then rebuild and reflash. The auto-generated `SPECTER-XXXX` default name is used
+when `NODE_NAME_STR` is absent.
 
 ---
 
@@ -389,7 +426,7 @@ dx-lr30-fw/
 | Protocol | Full MeshCore v1 | Full MeshCore v1 flood |
 | Cryptography | Ed25519 signing | Ed25519 signing (deterministic from UID) |
 | Cost | $25–$60 | ~$8 |
-| MCU Flash used | varies | 52KB / 128KB (39.5%) |
+| MCU Flash used | varies | 50KB / 128KB (38.5%) |
 | Runs standalone | ✅ | ✅ |
 
 The DX-LR30 was designed as a LoRa **AT-command shell** (similar to a Hayes
@@ -414,6 +451,9 @@ counting, path tracking, Ed25519 signing, and ADVERT generation.
 
 **"Failed to init device" when flashing:**
 → Use `-b 57600` baud (not 115200). See [development-notes.md](docs/development-notes.md#critical-stm32-bootloader-baud-rate)
+
+**Board stuck in fast LED blink (radio HALT):**
+→ The IWDG watchdog auto-resets the board in ≤ 8 s and retries. Transient SX1262 SPI glitches recover without intervention. See [development-notes.md](docs/development-notes.md#independent-watchdog-iwdg)
 
 **Repeater doesn't appear in MeshCore app:**
 → Verify Ed25519 signing is enabled and radio params match exactly. See [development-notes.md](docs/development-notes.md#ed25519-signature-requirement)

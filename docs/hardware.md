@@ -59,7 +59,7 @@ flowchart LR
 
 | GPIO | Function | Notes |
 |------|----------|-------|
-| PC13 | Onboard LED | Active LOW. ON during init, OFF when ready, blinks on TX |
+| PB11 | Onboard LED | Active HIGH. 1 blink = RX · 2 fast blinks = relay TX · solid ON = ADVERT TX · 5 Hz = HALT (IWDG resets in ≤ 8 s) |
 
 ---
 

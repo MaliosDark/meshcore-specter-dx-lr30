@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# flash.sh, Flashea SPECTER en DX-LR30 (STM32F103C8T6)
+# flash.sh, flash SPECTER on DX-LR30 (STM32F103C8T6)
 #
-# Método: bootloader via botones físicos (más fiable que DTR/RTS en CH340)
+# Method: bootloader via physical buttons (more reliable than DTR/RTS on CH340)
 #
-# Uso:
-#   ./flash.sh              → compila + flashea
-#   ./flash.sh --no-build   → solo flashea el .bin ya compilado
-#   ./flash.sh --monitor    → flashea y abre monitor serie
+# Usage:
+#   ./flash.sh              -> build + flash
+#   ./flash.sh --no-build   -> flash the already-built .bin only
+#   ./flash.sh --monitor    -> flash and open serial monitor
 
 set -e
 
 PORT="/dev/ttyUSB0"
-BAUD=57600  # ⚠️ Este board requiere 57600, no 115200
-FW=".pio/build/specter/firmware.bin"
+BAUD=57600  # This board requires 57600, not 115200
+FW=".pio/build/specter_repeater/firmware.bin"
 BUILD=true
 MONITOR=false
 
@@ -26,19 +26,19 @@ for arg in "$@"; do
     esac
 done
 
-# ── Compilar ──────────────────────────────────────────────────────────────────
+# -- Build --------------------------------------------------------------------
 if $BUILD; then
     echo "════════════════════════════════════════"
-    echo " Compilando SPECTER..."
+    echo " Building SPECTER..."
     echo "════════════════════════════════════════"
-    pio run -e specter
+    pio run -e specter_repeater
     echo ""
 fi
 
-# ── Verificar firmware ────────────────────────────────────────────────────────
+# -- Verify firmware ----------------------------------------------------------
 if [[ ! -f "$FW" ]]; then
-    echo " ERROR: No se encontró $FW"
-    echo "Ejecuta primero: pio run -e specter"
+    echo " ERROR: $FW was not found"
+    echo "Run first: pio run -e specter_repeater"
     exit 1
 fi
 
@@ -46,20 +46,20 @@ SIZE=$(stat -c%s "$FW")
 echo "Firmware: $FW ($SIZE bytes)"
 echo ""
 
-# ── Instrucciones de bootloader ───────────────────────────────────────────────
+# -- Bootloader instructions --------------------------------------------------
 echo "════════════════════════════════════════"
-echo " ENTRADA AL BOOTLOADER (modo manual)"
+echo " BOOTLOADER ENTRY (manual mode)"
 echo "════════════════════════════════════════"
 echo ""
-echo "  1. Mantén pulsado  [BOOT0]"
-echo "  2. Pulsa y suelta  [RESET]"
-echo "  3. Suelta          [BOOT0]"
+echo "  1. Hold       [BOOT0]"
+echo "  2. Press/release [RESET]"
+echo "  3. Release    [BOOT0]"
 echo ""
-echo "Luego presiona ENTER para iniciar el flash..."
+echo "Then press ENTER to start flashing..."
 read -r
 
-# ── Flashear ──────────────────────────────────────────────────────────────────
-echo "Flasheando → $PORT @ ${BAUD}..."
+# -- Flash --------------------------------------------------------------------
+echo "Flashing -> $PORT @ ${BAUD}..."
 stm32flash \
     -w "$FW" \
     -v \
@@ -69,13 +69,13 @@ stm32flash \
 
 echo ""
 echo "════════════════════════════════════════"
-echo " SPECTER flasheado correctamente ✓"
+echo " SPECTER flashed successfully"
 echo "════════════════════════════════════════"
 
-# ── Monitor serie (opcional) ──────────────────────────────────────────────────
+# -- Serial monitor (optional) ------------------------------------------------
 if $MONITOR; then
     echo ""
-    echo "Abriendo monitor serie (Ctrl+] para salir)..."
+    echo "Opening serial monitor (Ctrl+] to exit)..."
     sleep 1
     python3 -m serial.tools.miniterm --eol LF "$PORT" "$BAUD"
 fi
